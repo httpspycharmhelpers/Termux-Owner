@@ -1,0 +1,195 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+
+DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+DEX="$DIR/own.dex"
+TMP=/data/local/tmp/own.dex
+APP=/system/bin/app_process
+BOOT="$APP -Djava.class.path=$DEX /system/bin --nice-name=own sysr.Main rish"
+export RISH_APPLICATION_ID=com.termux
+ADMIN=com.termux.api/com.termux.api.dhizuku.TermuxDeviceAdminReceiver
+DZ=com.rosan.dhizuku/com.rosan.dhizuku.server.DhizukuDAReceiver
+CALLER=com.rosan.dhizuku
+
+usage() {
+  cat <<EOF
+usage:
+  owner -c <command> [args...]        Dhizuku/device-owner command
+  owner shell [command]               Shizuku shell (uid 2000)
+  owner shell -c <command>            explicit shell
+  owner help
+
+Dhizuku (device owner):
+  status | request | delegate [pkg] [scopes]
+  grant <pkg> <permission> | revoke <pkg> <permission>
+  tx <service> <code> [args...] [r:i32|r:i64|r:bool|r:str|r:hex|r:none]
+     arg types: s16 X | i32 N | i64 N | b true|false | null | sarr A,B
+                cn pkg/cls | tnull
+  dpm transfer <target-cn>
+  dpm backup on|off
+  dpm hide <pkg> on|off
+  dpm uninstall-block <pkg> on|off
+  dpm grant|revoke <pkg> <permission>
+  dpm global <key> <value> | dpm secure <key> <value>
+  dpm install-existing <pkg>
+  dpm camera on|off | dpm screen-capture on|off
+  dpm admin-add <cn> | dpm admin-remove <cn>
+
+Shizuku (shell):
+  pm <args...> | appops <args...> | settings <args...> | cmd <args...>
+  install <apk...>     silent install via Dhizuku device owner
+  uninstall <pkg> | install-existing <pkg>
+  freeze <pkg> | unfreeze <pkg> | force-stop <pkg> | clear <pkg>
+  perm grant|revoke <pkg> <permission>
+EOF
+}
+
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+bool() { case "$1" in on|true|1|yes) echo true;; *) echo false;; esac; }
+
+ensure_tmp() {
+  local lsize rsize
+  lsize=$(stat -c %s "$DEX" 2>/dev/null || echo 0)
+  rsize=$(printf 'stat -c %%s %s 2>/dev/null\n' "$TMP" | $BOOT 2>/dev/null | tr -dc '0-9')
+  if [ "$lsize" = "$rsize" ] && [ "$lsize" != "0" ]; then
+    return 0
+  fi
+  cp "$DEX" /sdcard/Download/own.dex 2>/dev/null || {
+    echo "owner: cannot copy dex to /sdcard/Download" >&2
+    return 1
+  }
+  printf 'cp /sdcard/Download/own.dex %s && chmod 644 %s && echo deployed\n' "$TMP" "$TMP" | $BOOT 2>/dev/null | tail -1
+}
+
+run_shell() {
+  if [ -n "${1-}" ]; then
+    printf '%s\n' "$1" | $BOOT
+  else
+    exec $BOOT
+  fi
+}
+
+run_owner() {
+  local q="" a
+  for a in "$@"; do q="$q $(sq "$a")"; done
+  ensure_tmp >/dev/null || return 1
+  printf 'RISH_APPLICATION_ID=com.termux %s -Djava.class.path=%s /system/bin --nice-name=own-owner sysr.Owner%s\n' \
+    "$APP" "$TMP" "$q" | $BOOT
+}
+
+run_dpm() { run_owner tx device_policy "$@"; }
+
+dpm_cmd() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    transfer)
+      [ $# -ge 1 ] || { echo "usage: owner dpm transfer <target-pkg/cls>" >&2; return 2; }
+      run_dpm 288 cn "$DZ" cn "$1" pb r:none ;;
+    backup)
+      run_dpm 267 cn "$DZ" b "$(bool "${1:-off}")" r:none ;;
+    hide)
+      [ $# -ge 2 ] || { echo "usage: owner dpm hide <pkg> on|off" >&2; return 2; }
+      run_dpm 149 cn "$DZ" s16 "$CALLER" s16 "$1" b "$(bool "$2")" b false r:bool ;;
+    uninstall-block)
+      [ $# -ge 2 ] || { echo "usage: owner dpm uninstall-block <pkg> on|off" >&2; return 2; }
+      run_dpm 188 cn "$DZ" s16 "$CALLER" s16 "$1" b "$(bool "$2")" r:none ;;
+    grant|revoke)
+      [ $# -ge 2 ] || { echo "usage: owner dpm grant|revoke <pkg> <permission>" >&2; return 2; }
+      local st=1; [ "$sub" = revoke ] && st=2
+      run_dpm 225 cn "$DZ" s16 "$CALLER" s16 "$1" s16 "$2" i32 "$st" tnull r:bool ;;
+    global|secure)
+      [ $# -ge 2 ] || { echo "usage: owner dpm $sub <key> <value>" >&2; return 2; }
+      local code=177; [ "$sub" = secure ] && code=179
+      run_dpm "$code" cn "$DZ" s16 "$1" s16 "$2" r:none ;;
+    install-existing)
+      [ $# -ge 1 ] || { echo "usage: owner dpm install-existing <pkg>" >&2; return 2; }
+      run_dpm 164 cn "$DZ" s16 "$CALLER" s16 "$1" r:bool ;;
+    camera|screen-capture)
+      [ $# -ge 1 ] || { echo "usage: owner dpm $sub on|off" >&2; return 2; }
+      local code=53; [ "$sub" = screen-capture ] && code=55
+      run_dpm "$code" cn "$DZ" b "$(bool "$1")" b false r:none ;;
+    admin-add)
+      [ $# -ge 1 ] || { echo "usage: owner dpm admin-add <cn>" >&2; return 2; }
+      run_dpm 63 cn "$1" b true i32 0 r:none ;;
+    admin-remove)
+      [ $# -ge 1 ] || { echo "usage: owner dpm admin-remove <cn>" >&2; return 2; }
+      run_dpm 68 cn "$1" r:none ;;
+    *)
+      echo "unknown dpm command: ${sub:-}" >&2; usage >&2; return 2 ;;
+  esac
+}
+
+[ -f "$DEX" ] || { echo "owner: missing $DEX" >&2; exit 1; }
+
+case "${1:-}" in
+  ""|-h|--help|help) usage ;;
+  shell)
+    shift
+    if [ "${1:-}" = "-c" ]; then shift; fi
+    run_shell "$*"
+    ;;
+  -c)
+    shift
+    [ $# -gt 0 ] || { usage >&2; exit 2; }
+    if [ $# -eq 1 ]; then
+      read -r -a _parts <<< "$1"
+      set -- "${_parts[@]}"
+    fi
+    run_owner "$@"
+    ;;
+  dpm) shift; dpm_cmd "$@" ;;
+  pm) shift; run_shell "pm $*" ;;
+  appops) shift; run_shell "appops $*" ;;
+  settings) shift; run_shell "settings $*" ;;
+  cmd) shift; run_shell "cmd $*" ;;
+  install)
+    shift
+    [ $# -gt 0 ] || { echo "usage: owner install <apk...>" >&2; exit 2; }
+    for apk in "$@"; do
+      [ -f "$apk" ] || { echo "owner: no such file: $apk" >&2; continue; }
+      base=$(basename "$apk")
+      tmp="/data/local/tmp/$base"
+      run_shell "cp $(sq "$apk") $(sq "$tmp") && chmod 644 $(sq "$tmp")" >/dev/null
+      run_owner install "$tmp"
+    done
+    ;;
+  uninstall)
+    shift
+    [ $# -ge 1 ] || { echo "usage: owner uninstall <pkg>" >&2; exit 2; }
+    run_shell "pm uninstall --user 0 $(sq "$1")"
+    ;;
+  install-existing)
+    shift
+    [ $# -ge 1 ] || { echo "usage: owner install-existing <pkg>" >&2; exit 2; }
+    run_shell "cmd package install-existing --user 0 $(sq "$1")"
+    ;;
+  freeze)
+    shift
+    [ $# -ge 1 ] || { echo "usage: owner freeze <pkg>" >&2; exit 2; }
+    run_shell "pm disable-user --user 0 $(sq "$1")"
+    ;;
+  unfreeze)
+    shift
+    [ $# -ge 1 ] || { echo "usage: owner unfreeze <pkg>" >&2; exit 2; }
+    run_shell "pm enable $(sq "$1")"
+    ;;
+  force-stop)
+    shift
+    [ $# -ge 1 ] || { echo "usage: owner force-stop <pkg>" >&2; exit 2; }
+    run_shell "am force-stop $(sq "$1")"
+    ;;
+  clear)
+    shift
+    [ $# -ge 1 ] || { echo "usage: owner clear <pkg>" >&2; exit 2; }
+    run_shell "pm clear --user 0 $(sq "$1")"
+    ;;
+  perm)
+    shift
+    sub=${1:-}; shift || true
+    [ $# -ge 2 ] || { echo "usage: owner perm grant|revoke <pkg> <permission>" >&2; exit 2; }
+    run_shell "pm $sub --user 0 $(sq "$1") $(sq "$2")"
+    ;;
+  *)
+    run_owner "$@"
+    ;;
+esac
