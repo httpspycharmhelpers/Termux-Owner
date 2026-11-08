@@ -25,15 +25,21 @@ Dhizuku (device owner):
   tx <service> <code> [args...] [r:i32|r:i64|r:bool|r:str|r:hex|r:none]
      arg types: s16 X | i32 N | i64 N | b true|false | null | sarr A,B
                 cn pkg/cls | tnull
-  dpm transfer <target-cn>
-  dpm backup on|off
-  dpm hide <pkg> on|off
-  dpm uninstall-block <pkg> on|off
-  dpm grant|revoke <pkg> <permission>
-  dpm global <key> <value> | dpm secure <key> <value>
-  dpm install-existing <pkg>
+  dpm <command> [args...]             owner DPM / OwnDroid-compatible
+  dpm status | dpm usage
   dpm camera on|off | dpm screen-capture on|off
-  dpm admin-add <cn> | dpm admin-remove <cn>
+  dpm usb on|off | dpm status-bar on|off | dpm volume-mute on|off
+  dpm hide <pkg> on|off | dpm suspend <pkg> on|off
+  dpm uninstall-block <pkg> on|off | dpm grant|revoke <pkg> <perm>
+  dpm restriction add|remove|list <key> [...] | dpm restrictions
+  dpm lock-task packages|features|status ... | dpm keep-uninstalled ...
+  dpm global <key> <value> | dpm secure <key> <value>
+  dpm ca-install|ca-uninstall <cert> | dpm ca-list
+  dpm user-list | dpm user-create|remove|switch|start|stop ...
+  dpm password-quality|password-min-length|password-complexity [n]
+  dpm keyguard on|off | dpm lock
+  dpm transfer <target-cn> | dpm admin-add|admin-remove <cn>
+  dpm call-admin <method> [args]       generic DPM escape hatch
 
 Shizuku (shell):
   pm <args...> | appops <args...> | settings <args...> | cmd <args...>
@@ -47,10 +53,36 @@ EOF
 sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 bool() { case "$1" in on|true|1|yes) echo true;; *) echo false;; esac; }
 
+wake_shizuku() {
+  am start -n moe.shizuku.privileged.api/moe.shizuku.manager.MainActivity >/dev/null 2>&1 || true
+  sleep 2
+}
+
+run_boot() {
+  local input="$1" out rc attempt
+  out=""
+  rc=1
+  for attempt in 1 2; do
+    out=$(printf '%s\n' "$input" | timeout 45 $BOOT 2>&1)
+    rc=$?
+    if [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ]; then
+      if printf '%s' "$out" | grep -Eqi 'binder.*(died|null)|DeadObject|Shizuku.*(not|fail)|timeout|not running'; then
+        wake_shizuku
+        continue
+      fi
+      printf '%s\n' "$out" | sed '/^\[start\] pid=/d'
+      return "$rc"
+    fi
+    wake_shizuku
+  done
+  printf '%s\n' "$out" | sed '/^\[start\] pid=/d'
+  return "$rc"
+}
+
 ensure_tmp() {
   local lsize rsize
   lsize=$(stat -c %s "$DEX" 2>/dev/null || echo 0)
-  rsize=$(printf 'stat -c %%s %s 2>/dev/null\n' "$TMP" | $BOOT 2>/dev/null | tr -dc '0-9')
+  rsize=$(run_boot "stat -c %s $TMP 2>/dev/null" 2>/dev/null | tr -dc '0-9')
   if [ "$lsize" = "$rsize" ] && [ "$lsize" != "0" ]; then
     return 0
   fi
@@ -58,13 +90,14 @@ ensure_tmp() {
     echo "owner: cannot copy dex to /sdcard/Download" >&2
     return 1
   }
-  printf 'cp /sdcard/Download/own.dex %s && chmod 644 %s && echo deployed\n' "$TMP" "$TMP" | $BOOT 2>/dev/null | tail -1
+  run_boot "cp /sdcard/Download/own.dex $TMP && chmod 644 $TMP && echo deployed" | tail -1
 }
 
 run_shell() {
   if [ -n "${1-}" ]; then
-    printf '%s\n' "$1" | $BOOT
+    run_boot "$1"
   else
+    wake_shizuku
     exec $BOOT
   fi
 }
@@ -73,50 +106,7 @@ run_owner() {
   local q="" a
   for a in "$@"; do q="$q $(sq "$a")"; done
   ensure_tmp >/dev/null || return 1
-  printf 'RISH_APPLICATION_ID=com.termux %s -Djava.class.path=%s /system/bin --nice-name=own-owner sysr.Owner%s\n' \
-    "$APP" "$TMP" "$q" | $BOOT
-}
-
-run_dpm() { run_owner tx device_policy "$@"; }
-
-dpm_cmd() {
-  local sub=${1:-}; shift || true
-  case "$sub" in
-    transfer)
-      [ $# -ge 1 ] || { echo "usage: owner dpm transfer <target-pkg/cls>" >&2; return 2; }
-      run_dpm 288 cn "$DZ" cn "$1" pb r:none ;;
-    backup)
-      run_dpm 267 cn "$DZ" b "$(bool "${1:-off}")" r:none ;;
-    hide)
-      [ $# -ge 2 ] || { echo "usage: owner dpm hide <pkg> on|off" >&2; return 2; }
-      run_dpm 149 cn "$DZ" s16 "$CALLER" s16 "$1" b "$(bool "$2")" b false r:bool ;;
-    uninstall-block)
-      [ $# -ge 2 ] || { echo "usage: owner dpm uninstall-block <pkg> on|off" >&2; return 2; }
-      run_dpm 188 cn "$DZ" s16 "$CALLER" s16 "$1" b "$(bool "$2")" r:none ;;
-    grant|revoke)
-      [ $# -ge 2 ] || { echo "usage: owner dpm grant|revoke <pkg> <permission>" >&2; return 2; }
-      local st=1; [ "$sub" = revoke ] && st=2
-      run_dpm 225 cn "$DZ" s16 "$CALLER" s16 "$1" s16 "$2" i32 "$st" tnull r:bool ;;
-    global|secure)
-      [ $# -ge 2 ] || { echo "usage: owner dpm $sub <key> <value>" >&2; return 2; }
-      local code=177; [ "$sub" = secure ] && code=179
-      run_dpm "$code" cn "$DZ" s16 "$1" s16 "$2" r:none ;;
-    install-existing)
-      [ $# -ge 1 ] || { echo "usage: owner dpm install-existing <pkg>" >&2; return 2; }
-      run_dpm 164 cn "$DZ" s16 "$CALLER" s16 "$1" r:bool ;;
-    camera|screen-capture)
-      [ $# -ge 1 ] || { echo "usage: owner dpm $sub on|off" >&2; return 2; }
-      local code=53; [ "$sub" = screen-capture ] && code=55
-      run_dpm "$code" cn "$DZ" b "$(bool "$1")" b false r:none ;;
-    admin-add)
-      [ $# -ge 1 ] || { echo "usage: owner dpm admin-add <cn>" >&2; return 2; }
-      run_dpm 63 cn "$1" b true i32 0 r:none ;;
-    admin-remove)
-      [ $# -ge 1 ] || { echo "usage: owner dpm admin-remove <cn>" >&2; return 2; }
-      run_dpm 68 cn "$1" r:none ;;
-    *)
-      echo "unknown dpm command: ${sub:-}" >&2; usage >&2; return 2 ;;
-  esac
+  run_boot "RISH_APPLICATION_ID=com.termux $APP -Djava.class.path=$TMP /system/bin --nice-name=own-owner sysr.Owner$q"
 }
 
 [ -f "$DEX" ] || { echo "owner: missing $DEX" >&2; exit 1; }
@@ -137,7 +127,7 @@ case "${1:-}" in
     fi
     run_owner "$@"
     ;;
-  dpm) shift; dpm_cmd "$@" ;;
+  dpm) shift; run_owner dpm "$@" ;;
   pm) shift; run_shell "pm $*" ;;
   appops) shift; run_shell "appops $*" ;;
   settings) shift; run_shell "settings $*" ;;

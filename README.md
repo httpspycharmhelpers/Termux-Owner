@@ -92,10 +92,17 @@ chmod +x ~/dex/owner
 ~/dex/owner unfreeze com.example.app
 ~/dex/owner force-stop com.example.app
 
-# Device Owner 管理
+# Device Owner 管理（动态 DPM，借用 Dhizuku owner 身份）
+~/dex/owner -c dpm status
+~/dex/owner -c dpm camera off      # 禁用摄像头
+~/dex/owner -c dpm camera on       # 启用摄像头
+~/dex/owner -c dpm keyguard on     # 启用锁屏
+~/dex/owner -c dpm keyguard off    # 禁用锁屏
+~/dex/owner -c dpm lock            # 立即锁屏
+~/dex/owner -c dpm user-list
+~/dex/owner -c dpm grant com.example.app android.permission.SOME_PERMISSION
 ~/dex/owner dpm transfer com.example/.AdminReceiver
-~/dex/owner dpm install-existing com.example.app
-~/dex/owner dpm grant com.example.app android.permission.SOME_PERMISSION
+~/dex/owner install-existing com.example.app
 ```
 
 完整用法：
@@ -127,8 +134,8 @@ chmod +x ~/dex/owner
 ### 产物 SHA-256
 
 ```text
-be0a1d334c785896edf306aead78b2bce18bfa5006e19d99e78dbd126512d7cc  Termux-Owner-v1.0.0.zip
-c21b4652315caa034d8de5793590e1b459b1b78633183599ddb04098f17a6a82  Termux-API-Dhizuku-v0.53.0.apk
+fcb7a7ccdbf48d8251f6a53e6f7390eddc3613530903f4beeaf186874fc9983a  Termux-Owner-v1.0.0.zip
+9702c8af1d5d1bbd17c325cf81c34dab36fc72b43e87e6325bd9e02694f632f7  Termux-API-Dhizuku-v0.53.0.apk
 6e273ab0e991c4e79bc8b1bbb9b9dd739ccac1a8712a541a214078886b7b790f  Shizuku-v13.6.0.apk
 ```
 
